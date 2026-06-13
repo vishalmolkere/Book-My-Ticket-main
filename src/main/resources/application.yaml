@@ -1,5 +1,10 @@
 server:
   port: 8081
+  spring:
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
 spring:
   application:
     name: book-my-ticket
