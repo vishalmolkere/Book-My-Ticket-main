@@ -1,26 +1,20 @@
 pipeline {
     agent any
 
-    stages {
+    environment {
+        FAILED_STAGE = "Not Started"
+    }
 
-        stage('Checkout') {
-            steps {
-                script {
-                    env.FAILED_STAGE = "None"
-                    git 'https://github.com/vishalmolkere/Book-My-Ticket-main.git'
-                }
-            }
-        }
+    stages {
 
         stage('Build') {
             steps {
                 script {
-                    try {
-                        sh 'mvn clean package -DskipTests'
-                    } catch (Exception e) {
-                        env.FAILED_STAGE = "Build"
-                        error "Build failed"
-                    }
+                    env.FAILED_STAGE = "Build"
+
+                    sh '''
+                    mvn clean package -DskipTests
+                    '''
                 }
             }
         }
@@ -28,10 +22,14 @@ pipeline {
         stage('Run') {
             steps {
                 script {
+                    env.FAILED_STAGE = "Run"
+
                     sh '''
-                        pkill -f book-my-ticket || true
-                        nohup java -jar target/*.jar > app.log 2>&1 &
-                        sleep 10
+                    pkill -f "book-my-ticket" || true
+
+                    nohup java -jar target/*.jar > app.log 2>&1 &
+
+                    sleep 15
                     '''
                 }
             }
@@ -40,12 +38,11 @@ pipeline {
         stage('Health Check') {
             steps {
                 script {
-                    try {
-                        sh 'curl -f http://localhost:8081'
-                    } catch (Exception e) {
-                        env.FAILED_STAGE = "Health Check"
-                        error "Health check failed"
-                    }
+                    env.FAILED_STAGE = "Health Check"
+
+                    sh '''
+                    curl -f http://localhost:8081
+                    '''
                 }
             }
         }
@@ -54,38 +51,69 @@ pipeline {
     post {
 
         success {
+
             withCredentials([
                 string(credentialsId: 'telegram-token', variable: 'TOKEN'),
                 string(credentialsId: 'telegram-chat-id', variable: 'CHAT_ID')
             ]) {
+
                 sh '''
                 curl -s -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
                 -d chat_id="${CHAT_ID}" \
-                -d text="✅ SUCCESS: Book My Ticket deployed successfully on ${NODE_NAME}"
+                -d text="✅ SUCCESS
+
+Project: Book-My-Ticket
+
+Build Number: '${BUILD_NUMBER}'
+
+Server: '${NODE_NAME}'
+
+Status: Deployment Successful"
                 '''
             }
         }
 
         failure {
+
             script {
 
-                def log = "No log available"
+                def errorLog = ""
 
                 try {
-                    log = sh(script: "tail -n 20 app.log || true", returnStdout: true).trim()
+                    errorLog = currentBuild.rawBuild.getLog(50).join('\n')
                 } catch (Exception e) {
-                    log = "Failed to fetch logs"
+                    errorLog = "Unable to fetch console logs."
                 }
+
+                errorLog = errorLog.take(3000)
 
                 withCredentials([
                     string(credentialsId: 'telegram-token', variable: 'TOKEN'),
                     string(credentialsId: 'telegram-chat-id', variable: 'CHAT_ID')
                 ]) {
-                    sh """
-                    curl -s -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
-                    -d chat_id="${CHAT_ID}" \
-                    -d text="❌ FAILED at stage: ${FAILED_STAGE}\n\nLast Logs:\n${log}"
-                    """
+
+                    writeFile(
+                        file: 'telegram_error.txt',
+                        text: """❌ DEPLOYMENT FAILED
+
+Project: Book-My-Ticket
+
+Stage: ${env.FAILED_STAGE}
+
+Build Number: ${env.BUILD_NUMBER}
+
+Last Console Logs:
+
+${errorLog}
+"""
+                    )
+
+                    sh '''
+                    curl -s -X POST \
+                    "https://api.telegram.org/bot${TOKEN}/sendDocument" \
+                    -F chat_id="${CHAT_ID}" \
+                    -F document=@telegram_error.txt
+                    '''
                 }
             }
         }
