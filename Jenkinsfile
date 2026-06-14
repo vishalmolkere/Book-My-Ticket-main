@@ -19,17 +19,24 @@ pipeline {
             }
         }
 
-        stage('Run') {
+        stage('Deploy') {
             steps {
                 script {
-                    env.FAILED_STAGE = "Run"
+                    env.FAILED_STAGE = "Deploy"
 
                     sh '''
                     pkill -f "book-my-ticket" || true
 
-                    nohup java -jar target/*.jar > app.log 2>&1 &
+                    JAR_FILE=$(find target -name "*.jar" | head -1)
 
-                    sleep 15
+                    if [ -z "$JAR_FILE" ]; then
+                      echo "No jar file found"
+                      exit 1
+                    fi
+
+                    nohup java -jar "$JAR_FILE" > app.log 2>&1 &
+
+                    sleep 20
                     '''
                 }
             }
@@ -58,17 +65,15 @@ pipeline {
             ]) {
 
                 sh '''
-                curl -s -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+                curl -s -X POST \
+                "https://api.telegram.org/bot${TOKEN}/sendMessage" \
                 -d chat_id="${CHAT_ID}" \
-                -d text="✅ SUCCESS
+                -d text="✅ DEPLOYMENT SUCCESS
 
 Project: Book-My-Ticket
-
-Build Number: '${BUILD_NUMBER}'
-
-Server: '${NODE_NAME}'
-
-Status: Deployment Successful"
+Build: #${BUILD_NUMBER}
+Node: ${NODE_NAME}
+Status: Application is running successfully."
                 '''
             }
         }
@@ -77,45 +82,62 @@ Status: Deployment Successful"
 
             script {
 
-                def errorLog = ""
+                def appLogs = ""
 
                 try {
-                    errorLog = currentBuild.rawBuild.getLog(50).join('\n')
+                    appLogs = sh(
+                        script: "tail -50 app.log 2>/dev/null || echo 'app.log not found'",
+                        returnStdout: true
+                    ).trim()
                 } catch (Exception e) {
-                    errorLog = "Unable to fetch console logs."
+                    appLogs = "Unable to read application logs"
                 }
 
-                errorLog = errorLog.take(3000)
+                writeFile(
+                    file: 'failure_report.txt',
+                    text: """
+DEPLOYMENT FAILED
+
+Project : Book-My-Ticket
+Build   : #${env.BUILD_NUMBER}
+Stage   : ${env.FAILED_STAGE}
+
+Application Logs:
+
+${appLogs}
+"""
+                )
 
                 withCredentials([
                     string(credentialsId: 'telegram-token', variable: 'TOKEN'),
                     string(credentialsId: 'telegram-chat-id', variable: 'CHAT_ID')
                 ]) {
 
-                    writeFile(
-                        file: 'telegram_error.txt',
-                        text: """❌ DEPLOYMENT FAILED
+                    sh '''
+                    curl -s -X POST \
+                    "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+                    -d chat_id="${CHAT_ID}" \
+                    -d text="❌ Deployment Failed
 
 Project: Book-My-Ticket
+Build: #${BUILD_NUMBER}
+Stage: ${FAILED_STAGE}
 
-Stage: ${env.FAILED_STAGE}
-
-Build Number: ${env.BUILD_NUMBER}
-
-Last Console Logs:
-
-${errorLog}
-"""
-                    )
+Detailed logs attached."
+                    '''
 
                     sh '''
                     curl -s -X POST \
                     "https://api.telegram.org/bot${TOKEN}/sendDocument" \
                     -F chat_id="${CHAT_ID}" \
-                    -F document=@telegram_error.txt
+                    -F document=@failure_report.txt
                     '''
                 }
             }
+        }
+
+        always {
+            archiveArtifacts artifacts: 'app.log', allowEmptyArchive: true
         }
     }
 }
